@@ -14,11 +14,13 @@ logger.addHandler(ch)
 
 
 class EMRLoader(object):
-    def __init__(self, aws_access_key, aws_secret_access_key, region_name,
+    def __init__(self, aws_access_key, aws_secret_access_key, aws_profile, region_name,
                  cluster_name, instance_count, master_instance_type, slave_instance_type,
-                 key_name, subnet_id, log_uri, software_version, script_bucket_name):
+                 key_name, subnet_id, log_uri, software_version, script_bucket_name,
+                 master_security_group, slave_security_group):
         self.aws_access_key = aws_access_key
         self.aws_secret_access_key = aws_secret_access_key
+        self.aws_profile = aws_profile
         self.region_name = region_name
         self.cluster_name = cluster_name
         self.instance_count = instance_count
@@ -29,12 +31,26 @@ class EMRLoader(object):
         self.log_uri = log_uri
         self.software_version = software_version
         self.script_bucket_name = script_bucket_name
+        if type(master_security_group) is str:
+            master_security_group = [master_security_group]
+        self.master_security_group = master_security_group[0]
+        del master_security_group[0]
+        self.master_addl_security_groups = master_security_group
+        if type(slave_security_group) is str:
+            slave_security_group = [slave_security_group]
+        self.slave_security_group = slave_security_group[0]
+        del slave_security_group[0]
+        self.slave_addl_security_groups = slave_security_group
 
     def boto_client(self, service):
-        client = boto3.client(service,
-                              aws_access_key_id=self.aws_access_key,
-                              aws_secret_access_key=self.aws_secret_access_key,
-                              region_name=self.region_name)
+        if self.aws_profile:
+            session = boto3.Session(profile_name=self.aws_profile)
+            client = session.client(service, region_name=self.region_name)
+        else:
+            client = boto3.client(service,
+                                  aws_access_key_id=self.aws_access_key,
+                                  aws_secret_access_key=self.aws_secret_access_key,
+                                  region_name=self.region_name)
         return client
 
     def load_cluster(self):
@@ -47,9 +63,13 @@ class EMRLoader(object):
                 'SlaveInstanceType': self.slave_instance_type,
                 'InstanceCount': self.instance_count,
                 'KeepJobFlowAliveWhenNoSteps': True,
-                'TerminationProtected': False,
+                'TerminationProtected': True,
                 'Ec2KeyName': self.key_name,
-                'Ec2SubnetId': self.subnet_id
+                'Ec2SubnetId': self.subnet_id,
+                'EmrManagedMasterSecurityGroup': self.master_security_group,
+                'AdditionalMasterSecurityGroups': self.master_addl_security_groups,
+                'EmrManagedSlaveSecurityGroup': self.slave_security_group,
+                'AdditionalSlaveSecurityGroups': self.slave_addl_security_groups
             },
             Applications=[
                 {
@@ -58,7 +78,7 @@ class EMRLoader(object):
             ],
             BootstrapActions=[
                 {
-                    'Name': 'Install Conda',
+                    'Name': 'Install Python packages',
                     'ScriptBootstrapAction': {
                         'Path': 's3://{script_bucket_name}/bootstrap_actions.sh'.format(
                             script_bucket_name=self.script_bucket_name),
@@ -88,11 +108,19 @@ class EMRLoader(object):
                     }
                 },
                 {
-                    'Name': 'setup pyspark with conda',
+                    'Name': 'setup sagemaker-pyspark in spark classpaths',
                     'ActionOnFailure': 'CANCEL_AND_WAIT',
                     'HadoopJarStep': {
                         'Jar': 'command-runner.jar',
                         'Args': ['sudo', 'bash', '/home/hadoop/pyspark_quick_setup.sh', master_dns]
+                    }
+                },
+                {
+                    'Name': 'cleaup',
+                    'ActionOnFailure': 'CANCEL_AND_WAIT',
+                    'HadoopJarStep': {
+                        'Jar': 'command-runner.jar',
+                        'Args': ['rm', '/home/hadoop/pyspark_quick_setup.sh']
                     }
                 }
             ]
@@ -107,7 +135,7 @@ class EMRLoader(object):
             s3.head_bucket(Bucket=bucket_name)
         except botocore.exceptions.ClientError as e:
             logger.info("Bucket does not exist: {error}. I will create it!".format(error=e))
-            s3.create_bucket(Bucket=bucket_name)
+            s3.create_bucket(Bucket=bucket_name, CreateBucketConfiguration={'LocationConstraint': self.region_name})
 
     def upload_to_s3(self, file_name, bucket_name, key_name):
         s3 = self.boto_client("s3")
@@ -127,6 +155,7 @@ def main():
     emr_loader = EMRLoader(
         aws_access_key=config_emr.get("aws_access_key"),
         aws_secret_access_key=config_emr.get("aws_secret_access_key"),
+        aws_profile=config_emr.get("aws_profile"),
         region_name=config_emr.get("region_name"),
         cluster_name=config_emr.get("cluster_name"),
         instance_count=config_emr.get("instance_count"),
@@ -136,7 +165,9 @@ def main():
         subnet_id=config_emr.get("subnet_id"),
         log_uri=config_emr.get("log_uri"),
         software_version=config_emr.get("software_version"),
-        script_bucket_name=config_emr.get("script_bucket_name")
+        script_bucket_name=config_emr.get("script_bucket_name"),
+        master_security_group=config_emr.get("master_security_group"),
+        slave_security_group=config_emr.get("slave_security_group")
     )
 
     logger.info(
@@ -168,7 +199,8 @@ def main():
         job_state_reason = job_response.get("Cluster").get("Status").get("StateChangeReason").get("Message")
 
         if job_state in ["WAITING", "TERMINATED", "TERMINATED_WITH_ERRORS"]:
-            step = False
+            if job_state in ["TERMINATED", "TERMINATED_WITH_ERRORS"]:
+                step = False
             logger.info(
                 "Script stops with state: {job_state} "
                 "and reason: {job_state_reason}".format(job_state=job_state, job_state_reason=job_state_reason))
