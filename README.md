@@ -3,9 +3,9 @@
 This code should help to jump start PySpark with Anaconda on AWS.
 
 ## Getting Started
-1. `conda env create -f environment.yml`
-2. Fill in all the required information e.g. aws access key, secret acess key etc. into the `config.yml.example` file and rename it to `config.yml`
-3. Run it `python emr_loader.py`
+
+ 1. Fill in all the required information e.g. aws access key, secret acess key etc. into the `config.yml.example` file and rename it to `config.yml`
+ 2. Run it `make run`
 
 ## Requirements
 - [Anaconda 3](https://www.continuum.io/downloads)
